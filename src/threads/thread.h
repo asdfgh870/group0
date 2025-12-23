@@ -20,6 +20,21 @@ enum thread_status {
 typedef int tid_t;
 #define TID_ERROR ((tid_t)-1) /* Error value for tid_t. */
 
+typedef struct fpu_t
+{
+    uint16_t control;
+    uint16_t RESERVED1;
+    uint16_t status;
+    uint16_t RESERVED2;
+    uint16_t tag;
+    uint16_t RESERVED3;
+    uint32_t fip0;
+    uint32_t fop0;
+    uint32_t fdp0;
+    uint32_t fdp1;
+    char regs[80];
+}fpu_t;
+
 /* Thread priorities. */
 #define PRI_MIN 0      /* Lowest priority. */
 #define PRI_DEFAULT 31 /* Default priority. */
@@ -87,8 +102,13 @@ struct thread {
   enum thread_status status; /* Thread state. */
   char name[16];             /* Name (for debugging purposes). */
   uint8_t* stack;            /* Saved stack pointer. */
-  int priority;              /* Priority. */
+  int priority;              /* Priority. */\
+  int base_priority;                  /* Base priority. */
+  struct list locks;                  /* Locks that the thread is holding. */
+  struct lock *lock_waiting;          /* The lock that the thread is waiting for. */
   struct list_elem allelem;  /* List element for all threads list. */
+  int nice;   /*mlfqs调度中使用到的nice值 */
+  fixed_point_t  recent_cpu;      /* 当前线程最近占用cpu时间，单位为1个tick */
 
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
@@ -97,9 +117,46 @@ struct thread {
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
 #endif
+  bool fpu_flag; // 是否使用过fpu
+  fpu_t* fpu_state;
+
+  int64_t ticks_blocked;
+
+  int fd_can_allocate; /* 可用fd，TODO：维护fd位图 */
+
+  struct file* cur_thread_exec_file; //指向当前线程执行的可执行文件的
+  
+  struct list file_list; /* 已经打开的文件列表 */
+
+  struct thread* parent; // 父线程，最上层为NULL。
+  struct list child_thread; // 子线程
+  struct thread_list_item* child; // 1.用来寻找子线程列表。2.thread_list_item保存子线程本身状态
+
+  struct semaphore exec_sem; /* process_execute中等待执行结果原语 */
+  bool exec_result; /* 子进程加载可执行文件的状态 */
+
+  int exit_code; /* 当前线程退出码 */
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
+};
+
+/* 子线程列表中元素 */
+struct thread_list_item {
+  tid_t tid; 
+  struct thread *t; //
+  bool is_alive;
+  int exit_code;
+  bool is_waiting_on;
+  struct semaphore wait_sema;
+  struct list_elem elem;
+};
+
+/* 已打开的文件 */
+struct file_opened {
+  int fd;
+  struct file* file_ptr;
+  struct list_elem file_elem;
 };
 
 /* Types of scheduler that the user can request the kernel
@@ -148,5 +205,14 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+void fpu_disable(void);
+void fpu_enable(void);
+
+void blocked_thread_check(struct thread *t, void *aux UNUSED);
+void thread_donate_priority(struct thread *t);
+void thread_remove_lock (struct lock *lock);
+void thread_update_priority (struct thread *t);
+bool thread_cmp_priority(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED);
 
 #endif /* threads/thread.h */

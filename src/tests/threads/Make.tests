@@ -87,7 +87,7 @@ $(MLFQS_OUTPUTS): KERNELFLAGS += -sched=mlfqs
 $(MLFQS_OUTPUTS): TIMEOUT = 480
 
 # Force native threads tests to use bochs simulator
-tests/threads/%.output: SIMULATOR = --bochs
+tests/threads/%.output: SIMULATOR = --qemu
 
 tests/threads/%.output: RUNCMD = rtkt
 

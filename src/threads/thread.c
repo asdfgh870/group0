@@ -24,6 +24,10 @@
    that are ready to run but not actually running. */
 static struct list fifo_ready_list;
 
+/* 优先级进程队列 */
+/* TODO:使用大顶堆实现，又名优先级队列。 */
+static struct list prio_ready_list;
+
 /* List of all processes.  Processes are added to this list
    when they are first scheduled and removed when they exit. */
 static struct list all_list;
@@ -36,6 +40,9 @@ static struct thread* initial_thread;
 
 /* Lock used by allocate_tid(). */
 static struct lock tid_lock;
+
+/* mlfqs调度时的平均负载 */
+fixed_point_t load_avg;
 
 /* Stack frame for kernel_thread(). */
 struct kernel_thread_frame {
@@ -109,6 +116,7 @@ void thread_init(void) {
   lock_init(&tid_lock);
   list_init(&fifo_ready_list);
   list_init(&all_list);
+  list_init(&prio_ready_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread();
@@ -123,6 +131,7 @@ void thread_start(void) {
   /* Create the idle thread. */
   struct semaphore idle_started;
   sema_init(&idle_started, 0);
+  load_avg = fix_int (0);
   thread_create("idle", PRI_MIN, idle, &idle_started);
 
   /* Start preemptive thread scheduling. */
@@ -191,11 +200,27 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   init_thread(t, name, priority);
   tid = t->tid = allocate_tid();
 
+  /*保存当前线程作为子线程时的状态 */
+  t->child = (struct thread_list_item*)malloc(sizeof(struct thread_list_item));
+  t->child->tid = tid;
+  t->child->t = t;
+  t->child->is_alive = true;
+  t->child->exit_code = 0;
+  t->child->is_waiting_on = false;
+  t->ticks_blocked = 0;
+  sema_init(&t->child->wait_sema, 0);
+
+  t->fpu_flag = false;
+
+  t->parent = thread_current();
+  // 向父线程添加当前线程为子线程
+  list_push_back(&t->parent->child_thread, &t->child->elem);
+
   /* Stack frame for kernel_thread(). */
   kf = alloc_frame(t, sizeof *kf);
   kf->eip = NULL;
-  kf->function = function;
-  kf->aux = aux;
+  kf->function = function; // start_process函数
+  kf->aux = aux; //运行start_process的参数
 
   /* Stack frame for switch_entry(). */
   ef = alloc_frame(t, sizeof *ef);
@@ -208,6 +233,10 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
 
   /* Add to run queue. */
   thread_unblock(t);
+   if (thread_current ()->priority < priority)
+   {
+     thread_yield ();
+   }
 
   return tid;
 }
@@ -222,8 +251,85 @@ void thread_block(void) {
   ASSERT(!intr_context());
   ASSERT(intr_get_level() == INTR_OFF);
 
-  thread_current()->status = THREAD_BLOCKED;
+  struct thread *cur = thread_current();
+
+  // 完成浮点运算状态保存再阻塞
+  if(cur->fpu_flag == true ) {
+    asm volatile("fnsave (%%eax) \n" ::"a"(cur->fpu_state));
+    fpu_disable();
+    cur->fpu_flag = false;
+  }
+
+  cur->status = THREAD_BLOCKED;
   schedule();
+}
+
+/* Remove a lock. */
+void thread_remove_lock (struct lock *lock)
+{
+  enum intr_level old_level = intr_disable ();
+  list_remove (&lock->elem);
+  thread_update_priority(thread_current());
+  intr_set_level (old_level);
+}
+
+bool thread_cmp_priority(const struct list_elem* a, const struct list_elem* b, void* aux UNUSED){
+  return list_entry(a,struct thread,elem)->priority > list_entry(b,struct thread,elem)->priority;
+}
+
+/* lock comparation function */
+bool lock_cmp_priority (const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  return list_entry (a, struct lock, elem)->max_priority > list_entry (b, struct lock, elem)->max_priority;
+}
+
+/* Let thread hold a lock , insert lock into priority list of lock*/
+void thread_hold_the_lock(struct lock *lock)
+{
+  enum intr_level old_level = intr_disable ();
+  list_insert_ordered (&thread_current ()->locks, &lock->elem, lock_cmp_priority, NULL);
+
+  if (lock->max_priority > thread_current ()->priority)
+  {
+    thread_current ()->priority = lock->max_priority;
+    // 被捐赠的低优先级线程的线程被改变需要抢占式调度。
+    thread_yield ();
+  }
+
+  intr_set_level (old_level);
+}
+
+/* Update priority. */
+void thread_update_priority(struct thread *t)
+{
+  enum intr_level old_level = intr_disable ();
+  int max_priority = t->base_priority;
+  int lock_priority;
+
+  if (!list_empty (&t->locks))
+  {
+    list_sort (&t->locks, lock_cmp_priority, NULL);
+    lock_priority = list_entry (list_front (&t->locks), struct lock, elem)->max_priority;
+    if (lock_priority > max_priority)
+      max_priority = lock_priority;
+  }
+
+  t->priority = max_priority;
+  intr_set_level (old_level);
+}
+
+/* Donate current priority to thread t. */
+void thread_donate_priority(struct thread *t)
+{
+  enum intr_level old_level = intr_disable ();
+  thread_update_priority(t);
+
+  if (t->status == THREAD_READY)
+  {
+    list_remove(&t->elem);
+    list_insert_ordered(&prio_ready_list, &t->elem, thread_cmp_priority, NULL);
+  }
+  intr_set_level (old_level);
 }
 
 /* Places a thread on the ready structure appropriate for the
@@ -236,6 +342,8 @@ static void thread_enqueue(struct thread* t) {
 
   if (active_sched_policy == SCHED_FIFO)
     list_push_back(&fifo_ready_list, &t->elem);
+  else if (active_sched_policy == SCHED_PRIO)
+    list_insert_ordered(&prio_ready_list, &t->elem, (list_less_func *) &thread_cmp_priority, NULL);
   else
     PANIC("Unimplemented scheduling policy value: %d", active_sched_policy);
 }
@@ -288,6 +396,59 @@ tid_t thread_tid(void) { return thread_current()->tid; }
 void thread_exit(void) {
   ASSERT(!intr_context());
 
+  struct thread *t_cur = thread_current();
+  struct list_elem* e;
+  /* 将子线程的parent 置为 NULL */
+  for (e = list_begin (&t_cur->child_thread); e != list_end (&t_cur->child_thread); e = list_next (e)) {
+    struct thread_list_item *item = list_entry(e, struct thread_list_item, elem);
+    // printf("parent-exit\n");
+    if(item->is_alive) {
+      item->t->parent = NULL;
+    }
+  }
+
+  //释放所有打开的文件
+  while (!list_empty(&t_cur->file_list))
+  {
+    e = list_pop_front(&t_cur->file_list);
+    struct file_opened *item = list_entry(e, struct file_opened, file_elem);
+    if(item->file_ptr!=NULL){
+      file_close(item->file_ptr);
+    }
+    free(item);
+  }
+
+  // 取消无法写入可执行你文件的保护
+  if(t_cur->cur_thread_exec_file!=NULL) {
+    file_allow_write(t_cur->cur_thread_exec_file);
+  }
+
+#ifdef USERPROG
+  process_exit();//释放pagedir
+#endif
+
+  /* 将退出的线程为子线程的处理 ,注意这个操作要在process_exit完成后再执行，不然父线程不等子线程完成就执行完成了。*/
+  if(t_cur->parent == NULL) {
+    free(t_cur->child);
+  } else {
+    // 保存当前子线程的 退出码，父线程可以访问到child->exit_code。
+    t_cur->child->exit_code = t_cur->exit_code;
+    /*  */
+    if (t_cur->child->is_waiting_on) {
+      sema_up(&t_cur->child->wait_sema);
+    }
+    // // 释放会出错
+    // if(t_cur->fpu_state !=NULL){
+    //   free(t_cur->fpu_state);
+    // }
+    // printf("is_alive be false\n");
+    t_cur->child->is_alive = false;
+    t_cur->child->t = NULL;
+  }
+
+  // 对exit的线程不执行fsave的操作保存浮点运算状态
+  t_cur->fpu_flag = false;
+
   /* Remove thread from all threads list, set our status to dying,
      and schedule another process.  That process will destroy us
      when it calls thread_switch_tail(). */
@@ -314,6 +475,69 @@ void thread_yield(void) {
   intr_set_level(old_level);
 }
 
+/* Increase recent_cpu by 1. */
+void
+thread_mlfqs_increase_recent_cpu_by_one (void)
+{
+  ASSERT (active_sched_policy == SCHED_MLFQS);
+  ASSERT (intr_context ());
+
+  struct thread *current_thread = thread_current ();
+  if (current_thread == idle_thread)
+    return;
+  current_thread->recent_cpu = fix_add (current_thread->recent_cpu, fix_int(1));
+}
+
+/* Update priority. */
+void
+thread_mlfqs_update_priority (struct thread *t)
+{
+  if (t == idle_thread)
+    return;
+
+  ASSERT (active_sched_policy == SCHED_MLFQS);
+  ASSERT (t != idle_thread);
+
+  t->priority =  fix_round (fix_sub (fix_sub (fix_int(PRI_MAX), fix_div (t->recent_cpu, fix_int(4))), 
+    fix_int(2* t->nice)));
+  t->priority = t->priority < PRI_MIN ? PRI_MIN : t->priority;
+  t->priority = t->priority > PRI_MAX ? PRI_MAX : t->priority;
+}
+
+/* Every per second to refresh load_avg and recent_cpu of all threads. */
+void
+thread_mlfqs_update_load_avg_and_recent_cpu (void)
+{
+  ASSERT (active_sched_policy == SCHED_MLFQS);
+  ASSERT (intr_context ());
+
+  // 优先级就绪队列
+  size_t ready_threads = list_size (&prio_ready_list);
+  if (thread_current () != idle_thread)
+    ready_threads++;
+  load_avg = fix_add (
+    fix_mul(fix_div(fix_int(59),fix_int(60)),load_avg), 
+    fix_mul( fix_inv(fix_int(60)),fix_int(ready_threads))
+  );
+  struct thread *t;
+  struct list_elem *e = list_begin (&all_list);
+  for (; e != list_end (&all_list); e = list_next (e))
+  {
+    t = list_entry(e, struct thread, allelem);
+    if (t != idle_thread)
+    {
+      t->recent_cpu =  fix_add (
+        fix_mul (fix_div (
+          fix_mul(load_avg, fix_int(2)),
+          fix_add (fix_mul(load_avg, fix_int(2)), fix_int(1))
+          ), 
+          t->recent_cpu), 
+        fix_int(t->nice));
+      thread_mlfqs_update_priority (t);
+    }
+  }
+}
+
 /* Invoke function 'func' on all threads, passing along 'aux'.
    This function must be called with interrupts off. */
 void thread_foreach(thread_action_func* func, void* aux) {
@@ -327,32 +551,66 @@ void thread_foreach(thread_action_func* func, void* aux) {
   }
 }
 
-/* Sets the current thread's priority to NEW_PRIORITY. */
-void thread_set_priority(int new_priority) { thread_current()->priority = new_priority; }
+void thread_set_priority (int new_priority)
+{
+  if (active_sched_policy == SCHED_MLFQS){
+    return;
+  }
+
+  enum intr_level old_level = intr_disable ();
+
+  struct thread *current_thread = thread_current ();
+  int old_priority = current_thread->priority;
+  current_thread->base_priority = new_priority;
+
+  if (list_empty (&current_thread->locks) || new_priority > old_priority)
+  {
+    current_thread->priority = new_priority;
+    thread_yield ();
+  }
+
+  intr_set_level (old_level);
+}
 
 /* Returns the current thread's priority. */
 int thread_get_priority(void) { return thread_current()->priority; }
 
 /* Sets the current thread's nice value to NICE. */
 void thread_set_nice(int nice UNUSED) { /* Not yet implemented. */
+  thread_current ()->nice = nice;
+  thread_mlfqs_update_priority (thread_current ());
+  thread_yield ();
 }
 
 /* Returns the current thread's nice value. */
 int thread_get_nice(void) {
   /* Not yet implemented. */
-  return 0;
+  return thread_current ()->nice;
 }
 
 /* Returns 100 times the system load average. */
 int thread_get_load_avg(void) {
   /* Not yet implemented. */
-  return 0;
+  return fix_round (fix_mul (load_avg, fix_int(100)));
 }
 
 /* Returns 100 times the current thread's recent_cpu value. */
 int thread_get_recent_cpu(void) {
   /* Not yet implemented. */
-  return 0;
+    return fix_round (fix_mul (thread_current ()->recent_cpu, fix_int(100)));
+}
+
+/* Check the blocked thread */
+void blocked_thread_check (struct thread *t, void *aux UNUSED)
+{
+  if (t->status == THREAD_BLOCKED && t->ticks_blocked > 0)
+  {
+      t->ticks_blocked--;
+      if (t->ticks_blocked == 0)
+      {
+          thread_unblock(t);
+      }
+  }
 }
 
 /* Idle thread.  Executes when no other thread is ready to run.
@@ -429,7 +687,21 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->stack = (uint8_t*)t + PGSIZE;
   t->priority = priority;
   t->pcb = NULL;
+  t->fd_can_allocate = 2; // 跳过 0、1
   t->magic = THREAD_MAGIC;
+
+  t->base_priority = priority;
+  list_init (&t->locks);
+  t->lock_waiting = NULL;
+
+  t->nice = 0;
+  t->recent_cpu = fix_int(0);
+
+  // 初始化打开的文件的列表
+  list_init(&t->file_list);
+  list_init(&t->child_thread);
+  sema_init(&t->exec_sem, 0);
+  t->exec_result = false;
 
   old_level = intr_disable();
   list_push_back(&all_list, &t->allelem);
@@ -457,7 +729,10 @@ static struct thread* thread_schedule_fifo(void) {
 
 /* Strict priority scheduler */
 static struct thread* thread_schedule_prio(void) {
-  PANIC("Unimplemented scheduler policy: \"-sched=prio\"");
+  if (!list_empty(&prio_ready_list))
+    return list_entry(list_pop_front(&prio_ready_list), struct thread, elem);
+  else
+    return idle_thread;
 }
 
 /* Fair priority scheduler */
@@ -514,7 +789,8 @@ void thread_switch_tail(struct thread* prev) {
 
 #ifdef USERPROG
   /* Activate the new address space. */
-  process_activate();
+  if(prev != NULL)
+    process_activate();
 #endif
 
   /* If the thread we switched from is dying, destroy its struct
@@ -544,9 +820,18 @@ static void schedule(void) {
   ASSERT(cur->status != THREAD_RUNNING);
   ASSERT(is_thread(next));
 
-  if (cur != next)
+  if (cur != next) {
+    if(cur->fpu_flag == true ) {
+      asm volatile("fnsave (%%eax) \n" ::"a"(cur->fpu_state));
+      cur->fpu_flag = false;
+      fpu_disable();
+    }
     prev = switch_threads(cur, next);
+  }
   thread_switch_tail(prev);
+  // printf("cur %s\n",cur->name);
+  // printf("next %s\n",next->name);
+  // printf("switch\n");
 }
 
 /* Returns a tid to use for a new thread. */
@@ -564,3 +849,31 @@ static tid_t allocate_tid(void) {
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof(struct thread, stack);
+
+enum
+{
+   CR0_EM = 1 << 2,  // Emulation 启用模拟，表示没有 FPU
+   CR0_TS = 1 << 3,  // Task Switch 任务切换，延迟保存浮点环境
+};
+
+uint32_t get_cr0()
+{
+   // 直接将 mov eax, cr0，返回值在 eax 中
+   asm volatile("movl %cr0, %eax\n");
+};
+
+// 设置 cr0 寄存器，参数是页目录的地址
+void set_cr0(uint32_t cr0)
+{
+   asm volatile("movl %%eax, %%cr0\n" ::"a"(cr0));
+}
+
+// 禁用FPU
+void fpu_disable()
+{
+  set_cr0(get_cr0() | (CR0_EM | CR0_TS));
+}
+
+void fpu_enable(){
+  set_cr0(get_cr0() & ~(CR0_EM | CR0_TS));
+}

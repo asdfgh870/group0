@@ -44,7 +44,7 @@ static inline int fix_round(fixed_point_t x) { return (x.f + FIX_F / 2) / FIX_F;
 static inline int fix_trunc(fixed_point_t x) { return x.f / FIX_F; }
 
 /* Returns X + Y. */
-static inline fixed_point_t fix_add(fixed_point_t x, fixed_point_t y) {
+ static inline fixed_point_t fix_add(fixed_point_t x, fixed_point_t y) {
   return __mk_fix(x.f + y.f);
 }
 

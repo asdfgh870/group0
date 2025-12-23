@@ -11,6 +11,7 @@ static long long page_fault_cnt;
 
 static void kill(struct intr_frame*);
 static void page_fault(struct intr_frame*);
+static void intr_no_fpu();
 
 /* Registers handlers for interrupts that can be caused by user
    programs.
@@ -43,7 +44,7 @@ void exception_init(void) {
   intr_register_int(0, 0, INTR_ON, kill, "#DE Divide Error");
   intr_register_int(1, 0, INTR_ON, kill, "#DB Debug Exception");
   intr_register_int(6, 0, INTR_ON, kill, "#UD Invalid Opcode Exception");
-  intr_register_int(7, 0, INTR_ON, kill, "#NM Device Not Available Exception");
+  intr_register_int(7, 0, INTR_ON, intr_no_fpu, "#NM Device Not Available Exception");// 协处理器fpu不可用异常
   intr_register_int(11, 0, INTR_ON, kill, "#NP Segment Not Present");
   intr_register_int(12, 0, INTR_ON, kill, "#SS Stack Fault Exception");
   intr_register_int(13, 0, INTR_ON, kill, "#GP General Protection Exception");
@@ -78,7 +79,8 @@ static void kill(struct intr_frame* f) {
       printf("%s: dying due to interrupt %#04x (%s).\n", thread_name(), f->vec_no,
              intr_name(f->vec_no));
       intr_dump_frame(f);
-      process_exit();
+      thread_current()->exit_code = -1;
+      thread_exit (); 
       NOT_REACHED();
 
     case SEL_KCSEG:
@@ -135,6 +137,17 @@ static void page_fault(struct intr_frame* f) {
   write = (f->error_code & PF_W) != 0;
   user = (f->error_code & PF_U) != 0;
 
+   // TODO:目前的bug是如果内核未设置返回地址，出现访问内存page_fault，进入死循环。
+   // kill(f);
+   if (!user) {
+      f->eip=f->eax;
+      f->eax = -1;
+      return;
+   } else {
+      struct thread* cur = thread_current();
+      cur->exit_code = -1;
+   }
+
   /* To implement virtual memory, delete the rest of the function
      body, and replace it with code that brings in the page to
      which fault_addr refers. */
@@ -142,4 +155,26 @@ static void page_fault(struct intr_frame* f) {
          not_present ? "not present" : "rights violation", write ? "writing" : "reading",
          user ? "user" : "kernel");
   kill(f);
+}
+
+// 优化
+// static struct thread* prev_thread;
+
+// FPU异常的中断处理
+static void intr_no_fpu(){
+   fpu_enable();
+
+   struct  thread* t_cur = thread_current();
+   // 如果 fpu 不为空，则恢复浮点环境
+   if( t_cur->fpu_state ){
+      asm volatile("frstor (%%eax) \n" ::"a"(t_cur->fpu_state));
+      t_cur->fpu_flag = true;
+   } else {
+      // 初次使用fpu
+      asm volatile(
+            "fnclex \n"
+            "fninit \n");
+      t_cur->fpu_state = (fpu_t *)malloc(sizeof(fpu_t));
+      t_cur->fpu_flag = true;
+   }
 }

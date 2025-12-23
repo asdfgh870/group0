@@ -26,7 +26,7 @@ TEST(16);
 TEST(64);
 TEST(256);
 
-struct semaphore barrier_sema;
+extern struct semaphore barrier_sema;
 struct semaphore sleep_sema;
 
 void test_smfs_starve(size_t competing_threads) {
