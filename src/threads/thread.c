@@ -51,6 +51,13 @@ struct kernel_thread_frame {
   void* aux;             /* Auxiliary data for function. */
 };
 
+/* Stack frame for user(). */
+struct user_thread_frame {
+  void* eip;             /* Return address. */
+  stub_fun* function;    /* Function to call. */
+  void* aux;             /* Auxiliary data for function. */
+};
+
 /* Statistics. */
 static long long idle_ticks;   /* # of timer ticks spent idle. */
 static long long kernel_ticks; /* # of timer ticks in kernel threads. */
@@ -876,4 +883,88 @@ void fpu_disable()
 
 void fpu_enable(){
   set_cr0(get_cr0() & ~(CR0_EM | CR0_TS));
+}
+
+/*
+  用户态系统调用使用的函数
+*/
+
+
+struct thread* pthread_current(uint32_t* esp) {
+  struct thread* t = pg_round_down(esp);
+
+  /* Make sure T is really a thread.
+     If either of these assertions fire, then your thread may
+     have overflowed its stack.  Each thread has less than 4 kB
+     of stack, so a few big automatic arrays or moderate
+     recursion can cause stack overflow. */
+  ASSERT(is_thread(t));
+  ASSERT(t->status == THREAD_RUNNING);
+
+  return t;
+}
+
+/*
+在内核中创建用户态线程的函数
+sfun 桩函数，执行入口
+fun 线程函数
+arg 线程参数
+*/
+tid_t kernel_pthread_create(stub_fun* sfun,pthread_fun* pfun, uint32_t* arg) {
+  struct thread* t;
+  struct user_thread_frame* uf;
+  struct switch_entry_frame* ef;
+  struct switch_threads_frame* sf;
+  tid_t tid;
+
+  /* Allocate thread.使用用户态内存空间 */
+  t = palloc_get_page(PAL_USER);
+  if (t == NULL)
+    return TID_ERROR;
+
+  /* Initialize thread. */
+  init_thread(t, "default-user-thread", PRI_DEFAULT);
+  tid = t->tid = allocate_tid();
+
+  /*保存当前线程作为子线程时的状态 */
+  t->child = (struct thread_list_item*)malloc(sizeof(struct thread_list_item));
+  t->child->tid = tid;
+  t->child->t = t;
+  t->child->is_alive = true;
+  t->child->exit_code = 0;
+  t->child->is_waiting_on = false;
+  t->ticks_blocked = 0;
+  sema_init(&t->child->wait_sema, 0);
+
+  t->fpu_flag = false;
+  t->status = THREAD_BLOCKED;
+
+  // 获取用户态触发中断的线程地址。
+  t->parent = pthread_current((uint32_t *)arg);
+  // 向父线程添加当前线程为子线程
+  list_push_back(&t->parent->child_thread, &t->child->elem);
+
+  /* Stack frame for kernel_thread(). */
+  uf = alloc_frame(t, sizeof *uf);
+  uf->eip = NULL;
+  uf->function = pfun;
+  uf->aux = *arg;
+
+  /* Stack frame for switch_entry(). */
+  ef = alloc_frame(t, sizeof *ef);
+  ef->eip = *sfun;
+
+  /* Stack frame for switch_threads(). */
+  sf = alloc_frame(t, sizeof *sf);
+  sf->eip = switch_entry;
+  sf->ebp = (uint8_t*)t+PGSIZE; // 4K用户态空间的顶端
+
+  /* Add to run queue. */
+  thread_unblock(t);
+  if (thread_current()->priority < PRI_DEFAULT)
+  {
+    thread_yield();
+  }
+
+  return tid;
 }

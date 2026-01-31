@@ -299,13 +299,18 @@ void sys_call_compute_e(struct intr_frame* f) {
 void sys_call_sys_pt_create(struct intr_frame* f) {
   stub_fun *stub_fun_ptr = (stub_fun*)check_user_addr_can_read(f->esp + ptr_size, ptr_size);
   pthread_fun *tfun_ptr = (pthread_fun *)check_user_addr_can_read(f->esp + 2 * ptr_size, ptr_size);
-  void *arg_ptr = check_user_addr_can_read(f->esp + 3 * ptr_size, ptr_size);
-  (*stub_fun_ptr)(*tfun_ptr,arg_ptr);
+  uint32_t *arg_ptr = check_user_addr_can_read(f->esp + 3 * ptr_size, ptr_size);
+  kernel_pthread_create(stub_fun_ptr,tfun_ptr,arg_ptr);
 }
 
 void sys_call_sys_pt_exit(struct intr_frame* f) {
   thread_current()->exit_code = 0;
   thread_exit();
+}
+
+void sys_call_sys_pt_join(struct intr_frame* f) {
+  tid_t tid = *(tid_t *)check_user_addr_can_read(f->esp + ptr_size, ptr_size);
+  
 }
 
 static void syscall_handler(struct intr_frame* f UNUSED) {
@@ -367,6 +372,8 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
       sys_call_sys_pt_create(f);
     case SYS_PT_EXIT:
       sys_call_sys_pt_exit(f);
+    case SYS_PT_JOIN:
+      sys_call_sys_pt_join(f);
     default:
       // 处理未知的系统调用类型
       break;
