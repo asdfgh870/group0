@@ -790,6 +790,9 @@ void thread_switch_tail(struct thread* prev) {
 
   /* Mark us as running. */
   cur->status = THREAD_RUNNING;
+  
+  /* 维护全局当前线程 */ 
+  global_thread_current = cur;
 
   /* Start new time slice. */
   thread_ticks = 0;
@@ -890,19 +893,6 @@ void fpu_enable(){
 */
 
 
-struct thread* pthread_current(uint32_t* esp) {
-  struct thread* t = pg_round_down(esp);
-
-  /* Make sure T is really a thread.
-     If either of these assertions fire, then your thread may
-     have overflowed its stack.  Each thread has less than 4 kB
-     of stack, so a few big automatic arrays or moderate
-     recursion can cause stack overflow. */
-  ASSERT(is_thread(t));
-  ASSERT(t->status == THREAD_RUNNING);
-
-  return t;
-}
 
 /*
 在内核中创建用户态线程的函数
@@ -939,8 +929,8 @@ tid_t kernel_pthread_create(stub_fun* sfun,pthread_fun* pfun, uint32_t* arg) {
   t->fpu_flag = false;
   t->status = THREAD_BLOCKED;
 
-  // 获取用户态触发中断的线程地址。
-  t->parent = pthread_current((uint32_t *)arg);
+  // 获取用户态触发中断的当前运行线程地址。
+  t->parent = global_thread_current;
   // 向父线程添加当前线程为子线程
   list_push_back(&t->parent->child_thread, &t->child->elem);
 

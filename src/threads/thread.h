@@ -141,6 +141,9 @@ struct thread {
   unsigned magic; /* Detects stack overflow. */
 };
 
+/* 全局当前运行线程 */ 
+struct thread* global_thread_current;
+
 /* 子线程列表中元素 */
 struct thread_list_item {
   tid_t tid; 
