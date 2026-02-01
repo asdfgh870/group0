@@ -102,7 +102,7 @@ struct thread {
   enum thread_status status; /* Thread state. */
   char name[16];             /* Name (for debugging purposes). */
   uint8_t* stack;            /* Saved stack pointer. */
-  int priority;              /* Priority. */\
+  int priority;              /* Priority. */
   int base_priority;                  /* Base priority. */
   struct list locks;                  /* Locks that the thread is holding. */
   struct lock *lock_waiting;          /* The lock that the thread is waiting for. */
@@ -131,6 +131,11 @@ struct thread {
   struct thread* parent; // 父线程，最上层为NULL。
   struct list child_thread; // 子线程
   struct thread_list_item* child; // 1.用来寻找子线程列表。2.thread_list_item保存子线程本身状态
+
+  /* 线程自身是不是被join等待中。*/
+  bool is_join_waited;
+  /* 当前线程join等待的子线程个数 */
+  int join_wait_count;
 
   struct semaphore exec_sem; /* process_execute中等待执行结果原语 */
   bool exec_result; /* 子进程加载可执行文件的状态 */

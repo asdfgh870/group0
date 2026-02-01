@@ -300,7 +300,7 @@ void sys_call_sys_pt_create(struct intr_frame* f) {
   stub_fun *stub_fun_ptr = (stub_fun*)check_user_addr_can_read(f->esp + ptr_size, ptr_size);
   pthread_fun *tfun_ptr = (pthread_fun *)check_user_addr_can_read(f->esp + 2 * ptr_size, ptr_size);
   uint32_t *arg_ptr = check_user_addr_can_read(f->esp + 3 * ptr_size, ptr_size);
-  kernel_pthread_create(stub_fun_ptr,tfun_ptr,arg_ptr);
+  f->eax = kernel_pthread_create(stub_fun_ptr,tfun_ptr,arg_ptr);
 }
 
 void sys_call_sys_pt_exit(struct intr_frame* f) {
@@ -310,7 +310,30 @@ void sys_call_sys_pt_exit(struct intr_frame* f) {
 
 void sys_call_sys_pt_join(struct intr_frame* f) {
   tid_t tid = *(tid_t *)check_user_addr_can_read(f->esp + ptr_size, ptr_size);
+  struct thread *t_cur = global_thread_current;
+  struct list_elem* e;
   
+  /*等待对应 pid的子线程返回 */
+  for (e = list_begin (&t_cur->child_thread); e != list_end (&t_cur->child_thread); e = list_next (e)) {
+    struct thread_list_item *item = list_entry(e, struct thread_list_item, elem);
+    if(tid == item->tid) {
+      ASSERT(item->is_alive);
+      item->t->is_join_waited = true;
+      item->t->parent->join_wait_count += 1;
+      /* 阻塞当前线程 */
+      ASSERT(!intr_context());
+      ASSERT(intr_get_level() == INTR_OFF);
+      struct thread *cur = global_thread_current;
+      // 完成浮点运算状态保存再阻塞
+      if(cur->fpu_flag == true ) {
+        asm volatile("fnsave (%%eax) \n" ::"a"(cur->fpu_state));
+        fpu_disable();
+        cur->fpu_flag = false;
+      }
+      cur->status = THREAD_BLOCKED;
+      schedule();
+    }
+  }
 }
 
 static void syscall_handler(struct intr_frame* f UNUSED) {

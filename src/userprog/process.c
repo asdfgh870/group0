@@ -256,14 +256,11 @@ int process_wait(pid_t child_pid) {
       if (!item->is_waiting_on && item->is_alive) { // 这个地方有BUG应该是测试用例的错误，不该删去
         item->is_waiting_on = true; //设置为等待状态
         sema_down(&item->wait_sema); // 等待完成
-        // printf(" wait success\n ");
         return item->exit_code;
       } else if (item->is_waiting_on) { // 已经被人等待了，
-        // printf(" wait already exit\n ");
         return -1;
       } else { // 线程已经结束
         item->is_waiting_on =true; //为应对 wait—twice测试
-        // printf(" thread exit\n ");
         return item->exit_code;
       }
     }

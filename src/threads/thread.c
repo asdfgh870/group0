@@ -218,6 +218,8 @@ tid_t thread_create(const char* name, int priority, thread_func* function, void*
   sema_init(&t->child->wait_sema, 0);
 
   t->fpu_flag = false;
+  t->join_wait_count = 0;
+  t->is_join_waited =false;
 
   t->parent = thread_current();
   // 向父线程添加当前线程为子线程
@@ -449,6 +451,14 @@ void thread_exit(void) {
     //   free(t_cur->fpu_state);
     // }
     // printf("is_alive be false\n");
+    
+    if (t_cur->is_join_waited) {
+      t_cur->parent->join_wait_count -= 1;
+      if(t_cur->parent->join_wait_count == 0){
+        thread_unblock(t_cur->parent);
+      }
+    }
+
     t_cur->child->is_alive = false;
     t_cur->child->t = NULL;
   }
@@ -698,7 +708,8 @@ static void init_thread(struct thread* t, const char* name, int priority) {
   t->magic = THREAD_MAGIC;
 
   t->base_priority = priority;
-  list_init (&t->locks);
+  list_init(&t->locks);
+  list_init(&t->join_thread);
   t->lock_waiting = NULL;
 
   t->nice = 0;
@@ -928,6 +939,7 @@ tid_t kernel_pthread_create(stub_fun* sfun,pthread_fun* pfun, uint32_t* arg) {
 
   t->fpu_flag = false;
   t->status = THREAD_BLOCKED;
+  t->is_join_waited =false;
 
   // 获取用户态触发中断的当前运行线程地址。
   t->parent = global_thread_current;
